@@ -19,20 +19,42 @@ def _load_id_maps(id_map_path: str) -> Dict[str, Dict[str, int]]:
         return json.load(f)
 
 
-def _load_descriptions(parquet_path: str) -> Dict[str, str]:
+def _load_descriptions(parquet_path: str, name_column: Optional[str] = "auto") -> Dict[str, str]:
     df = pl.read_parquet(parquet_path)
-    expected = {"subreddit", "description"}
-    assert expected.issubset(set(df.columns)), (
-        f"Descriptions parquet missing columns. Found: {df.columns}, expected: {expected}"
+    cols = set(df.columns)
+
+    # Resolve subreddit name column
+    if name_column is None or name_column == "auto":
+        name_col = None
+        for cand in ("subreddit", "display_name", "name", "title"):
+            if cand in cols:
+                name_col = cand
+                break
+        assert name_col is not None, (
+            f"No subreddit name column found. Available columns: {sorted(df.columns)}"
+        )
+    else:
+        assert name_column in cols, (
+            f"Requested name column '{name_column}' not in columns: {sorted(df.columns)}"
+        )
+        name_col = name_column
+
+    # Resolve description column
+    desc_col = "description" if "description" in cols else None
+    if desc_col is None and "public_description" in cols:
+        desc_col = "public_description"
+    assert desc_col is not None, (
+        f"No description column found. Need one of ['description', 'public_description']."
     )
-    subs = df.get_column("subreddit").to_list()
-    descs = df.get_column("description").to_list()
+
+    subs = df.get_column(name_col).to_list()
+    descs = df.get_column(desc_col).to_list()
     out: Dict[str, str] = {}
     for s, d in zip(subs, descs):
         if d is None:
             continue
         d_str = str(d).strip()
-        if len(d_str) == 0:
+        if not d_str:
             continue
         out[str(s)] = d_str
     return out
@@ -52,6 +74,7 @@ def embed_subreddit_descriptions(
     api_base: Optional[str] = None,
     api_version: Optional[str] = None,
     api_key: Optional[str] = None,
+    name_column: Optional[str] = "auto",
     max_retries: int = 5,
     retry_backoff: float = 2.0,
 ) -> torch.Tensor:
@@ -69,6 +92,7 @@ def embed_subreddit_descriptions(
         api_base: Azure endpoint; falls back to AZURE_API_BASE.
         api_version: Azure API version; falls back to AZURE_API_VERSION.
         api_key: Azure API key; falls back to AZURE_API_KEY.
+        name_column: Column in descriptions parquet with subreddit names, or 'auto'.
         max_retries: Max retries per batch on transient failures.
         retry_backoff: Exponential backoff base seconds.
 
@@ -79,15 +103,23 @@ def embed_subreddit_descriptions(
     sub_to_id: Dict[str, int] = id_maps["sub_to_id"]
     num_subs = len(sub_to_id)
 
-    descriptions = _load_descriptions(desc_parquet)
+    descriptions = _load_descriptions(desc_parquet, name_column=name_column)
     if len(descriptions) == 0:
         logger.warning("No descriptions found; all subreddit vectors will be random init.")
 
     # Prepare items sorted by subreddit id for deterministic filling
     items: List[Tuple[int, str, str]] = []
+    hits = 0
     for s, sid in sub_to_id.items():
         if s in descriptions:
             items.append((sid, s, descriptions[s]))
+            hits += 1
+    if hits == 0:
+        logger.warning(
+            "No subreddit names matched between id map and descriptions. Check name_column mapping."
+        )
+    else:
+        logger.info("Matched %d/%d subreddits with descriptions (%.2f%%)", hits, len(sub_to_id), 100.0*hits/max(1,len(sub_to_id)))
 
     # Nothing to embed; return random
     if len(items) == 0:

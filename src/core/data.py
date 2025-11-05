@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import polars as pl
 import torch
@@ -47,6 +47,81 @@ def build_id_maps(df: pl.DataFrame) -> Tuple[Dict[str, int], Dict[str, int], Lis
     user_to_id = {u: i for i, u in enumerate(users)}
     sub_to_id = {s: i for i, s in enumerate(subs)}
     return user_to_id, sub_to_id, users, subs
+
+
+def build_id_maps_from_multiple(
+    dfs: List[pl.DataFrame],
+    user_col: str = "author",
+    sub_col: str = "subreddit",
+) -> Tuple[Dict[str, int], Dict[str, int], List[str], List[str]]:
+    """Build id maps from the union of users/subreddits across multiple frames.
+
+    Args:
+        dfs: List of DataFrames each containing user and subreddit columns.
+        user_col: Column name for users.
+        sub_col: Column name for subreddits.
+
+    Returns:
+        user_to_id, sub_to_id, id_to_user, id_to_sub
+    """
+    users: List[str] = []
+    subs: List[str] = []
+    for df in dfs:
+        if df is None:
+            continue
+        if user_col not in df.columns or sub_col not in df.columns:
+            continue
+        users.extend(df.get_column(user_col).unique().to_list())
+        subs.extend(df.get_column(sub_col).unique().to_list())
+    # stable (first occurrence) order
+    user_seen: Dict[str, int] = {}
+    sub_seen: Dict[str, int] = {}
+    id_to_user: List[str] = []
+    id_to_sub: List[str] = []
+    for u in users:
+        if u not in user_seen:
+            user_seen[u] = len(id_to_user)
+            id_to_user.append(u)
+    for s in subs:
+        if s not in sub_seen:
+            sub_seen[s] = len(id_to_sub)
+            id_to_sub.append(s)
+    return user_seen, sub_seen, id_to_user, id_to_sub
+
+
+def to_counts_df(
+    df: pl.DataFrame,
+    user_col: str = "author",
+    sub_col: str = "subreddit",
+    count_col: Optional[str] = None,
+) -> pl.DataFrame:
+    """Normalize an events table into a counts table [author, subreddit, total_count].
+
+    If `count_col` is provided and exists, it is summed, otherwise counts are computed via len().
+    """
+    if count_col and count_col in df.columns:
+        grouped = (
+            df.group_by([user_col, sub_col])
+            .agg(pl.col(count_col).sum().alias("total_count"))
+            .with_columns(
+                pl.col(user_col).cast(pl.Utf8),
+                pl.col(sub_col).cast(pl.Utf8),
+                pl.col("total_count").cast(pl.Int64),
+            )
+        )
+    else:
+        grouped = (
+            df.group_by([user_col, sub_col])
+            .len()
+            .rename({"len": "total_count"})
+            .with_columns(
+                pl.col(user_col).cast(pl.Utf8),
+                pl.col(sub_col).cast(pl.Utf8),
+                pl.col("total_count").cast(pl.Int64),
+            )
+        )
+    # rename to expected schema
+    return grouped.rename({user_col: "author", sub_col: "subreddit"})
 
 
 def compute_power_tfidf_weights(

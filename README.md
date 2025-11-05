@@ -22,7 +22,7 @@ uv run python -V
 Prepare weighted graph:
 ```bash
 uv run python scripts/prepare_graph.py \
-  --counts-parquet data/reddit/counts.parquet \
+  --counts-parquet data/merged_submissions_filtered_gt1.parquet \
   --out data/processed/graph.pt \
   --alpha 0.75 --tfidf-smooth 1.0
 ```
@@ -33,26 +33,34 @@ uv run python scripts/embed_subreddits.py \
   --desc-parquet data/reddit/subreddit_descriptions/filtered_subreddits_descriptions_v2.parquet \
   --id-map data/processed/id_maps.json \
   --out data/processed/sub_text_emb.pt \
-  --model azure/<your-deployment-name> \
+  --model azure/text-embedding-3-large \
   --dimensions 3072 \
-  --batch-size 128 \
-  --api-base $AZURE_API_BASE \
-  --api-version $AZURE_API_VERSION \
-  --api-key $AZURE_API_KEY
+  --batch-size 128
 ```
 
 Train with 8 GPUs:
+
+GraphSAGE (heterogeneous link prediction with neighbor sampling):
 ```bash
-uv run torchrun --nproc_per_node=8 scripts/train_bine.py --config configs/train_bine.yaml
+uv run python scripts/train_sageconv.py --config configs/train_sageconv.yaml
+```
+
+MetaPath2Vec (unsupervised random-walk embeddings):
+```bash
+uv run python scripts/train_metapath2vec.py --config configs/train_metapath2vec.yaml
 ```
 
 ## Config
-See `configs/train_bine.yaml` for defaults (3072-dim, AMP, cosine LR with warmup).
+See `configs/train_bine.yaml` for BiNE and the new `configs/train_sageconv.yaml`, `configs/train_metapath2vec.yaml` for PyG baselines.
 
 ## Outputs
 - Checkpoints under `data/processed/checkpoints/`
 - Final embeddings: `user_emb.pt`, `sub_emb.pt`
 - ID maps: `id_maps.json`
+
+New baselines:
+- GraphSAGE checkpoint: `data/processed/sageconv_latest.pt` (contains input embeddings and model state)
+- MetaPath2Vec checkpoint: `data/processed/metapath2vec_latest.pt`
 
 ## Reproducibility
 - Fixed seed, saved config, and deterministic mappings.

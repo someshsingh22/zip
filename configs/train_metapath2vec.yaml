@@ -1,0 +1,19 @@
+seed: 42
+paths:
+  out_dir: data/processed
+model:
+  embedding_dim: 300
+  walk_length: 80
+  context_size: 7
+  walks_per_node: 10
+  num_negative_samples: 10
+loader:
+  batch_size: 8192
+train:
+  epochs: 3
+  lr: 0.01
+logging:
+  log_every: 200
+  wandb_project: reddit-gnn
+
+

@@ -1,0 +1,13 @@
+#Sparse Embeddings + Adam
+1. sparse: use sparse embeddings only on single-GPU or carefully tuned setups (SparseAdam); DDP+Sparse can be tricky.
+2. Use Lightning + Gloo backend
+
+#Loss and negatives
+objective: logistic NS (current), BPR, or sampled softmax. Logistic NS is solid default.
+num_negative (Kneg): 5–50; start 5–10. Higher → cost↑, sometimes quality↑.
+neg_dist_exponent: degree^gamma for sampling; 0.5–1.0 (0.75 default).
+edge weighting in loss: use TF-IDF edge weight (default); you can clamp to [w_min, w_max] to limit extremes.
+
+#neighbor_k: top-K subreddits per user passed to the aggregator. Tradeoff ∝ K. 20–100 (50 default).
+max_neighbors_store: cache cap per user (≥ neighbor_k). 128–512 (256 default).
+neighbor sorting: by final TF-IDF weight desc (default). You can explore recency- or diversity-aware trims later.

@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-base", type=str, default=None, help="Azure API base; defaults to AZURE_API_BASE")
     parser.add_argument("--api-version", type=str, default=None, help="Azure API version; defaults to AZURE_API_VERSION")
     parser.add_argument("--api-key", type=str, default=None, help="Azure API key; defaults to AZURE_API_KEY")
+    parser.add_argument("--name-col", type=str, default="auto", help="Column with subreddit names in parquet (e.g., subreddit, display_name, name, title) or 'auto'")
     return parser.parse_args()
 
 
@@ -49,6 +50,7 @@ def main() -> None:
         api_base=args.api_base,
         api_version=args.api_version,
         api_key=args.api_key,
+        name_column=args.name_col,
     )
 
 
