@@ -29,3 +29,5 @@ venv/
 data/
 .env
 .cursorrules
+*.log
+todo
