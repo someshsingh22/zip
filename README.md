@@ -1,2 +1,1 @@
-# zip
-Zero shot Image Personalization
+# ZIP: Zero Shot Image Personalization
