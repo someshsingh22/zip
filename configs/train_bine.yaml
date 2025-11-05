@@ -1,0 +1,30 @@
+seed: 42
+paths:
+  counts_parquet: data/reddit/counts.parquet
+  subreddit_desc_parquet: data/reddit/subreddit_descriptions/filtered_subreddits_descriptions_v2.parquet
+  out_dir: data/processed
+model:
+  embedding_dim: 3072
+  num_negative: 5
+  init_sub_from_text: true
+  freeze_sub_epochs: 1
+train:
+  epochs: 10
+  batch_size: 131072
+  lr_user: 2.0e-3
+  lr_sub: 2.0e-4
+  weight_decay: 0.0
+  power_alpha: 0.75
+  tfidf_smooth: 1.0
+  edge_sampling: weighted
+  amp: true
+  warmup_ratio: 0.1
+distributed:
+  backend: nccl
+  num_nodes: 1
+  gpus_per_node: 8
+logging:
+  wandb_project: reddit-bine
+  log_every: 50
+
+

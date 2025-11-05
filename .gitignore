@@ -1,0 +1,31 @@
+__pycache__/
+.venv/
+.env
+.idea/
+.vscode/
+*.pt
+*.pth
+*.ckpt
+wandb/
+data/processed/
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual envs
+.venv/
+venv/
+
+# Editors/OS
+.idea/
+.vscode/
+.DS_Store
+
+# Test/metadata caches
+.pytest_cache/
+
+# Local data & secrets
+data/
+.env
+.cursorrules
