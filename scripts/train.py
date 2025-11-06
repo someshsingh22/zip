@@ -22,6 +22,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 scaler = torch.amp.GradScaler('cuda', enabled=True)
 
 edge_type = ("user", "interacts", "subreddit")
+TOTAL_POS_EDGES = int(data[edge_type].edge_index.size(1))
 loader = LinkNeighborLoader(
     data,
     num_neighbors=FANOUT,
@@ -31,11 +32,11 @@ loader = LinkNeighborLoader(
     pin_memory=True,
 )
 
-def train_one_epoch(loader, epoch):
+def train_one_epoch(loader, epoch, total_pos_edges: int):
     total_loss = 0
     total_pos = 0
-    pbar = tqdm(loader, desc=f"Epoch {epoch:02d} | EdgeType: interacts", unit="batch")
-    for batch in pbar:
+    pbar = tqdm(total=total_pos_edges, desc=f"Epoch {epoch:02d}", unit="edge")
+    for batch in loader:
         batch = batch.to(DEVICE, non_blocking=True)
         pos_src, pos_dst = batch[("user", "interacts", "subreddit")].edge_label_index
         neg_src, neg_dst = negative_sampling(
@@ -66,12 +67,14 @@ def train_one_epoch(loader, epoch):
 
         total_loss += loss.item() * pos_src.size(0)
         total_pos += pos_src.size(0)
-        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        remaining = max(total_pos_edges - total_pos, 0)
+        pbar.update(pos_src.size(0))
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "remaining": f"{remaining:,}"})
     return total_loss / max(total_pos, 1)
 
 for epoch in range(1, EPOCHS + 1):
     model.train()
-    train_one_epoch(loader, epoch)
+    train_one_epoch(loader, epoch, TOTAL_POS_EDGES)
 
 torch.save(model.state_dict(), "model.pt")
 print("✅ Model saved.")

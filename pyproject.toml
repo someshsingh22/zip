@@ -21,8 +21,11 @@ dependencies = [
   "numpy>=1.24.0",
   "PyYAML>=6.0.1",
   "pandas>=2.3.3",
+<<<<<<< HEAD
   "matplotlib>=3.8.0",
   "seaborn>=0.13.0",
+=======
+>>>>>>> origin/main
 ]
 
 [tool.ruff]

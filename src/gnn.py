@@ -44,40 +44,20 @@ class UserSubredditSAGE(torch.nn.Module):
             raise RuntimeError("No 'rev_interacts' edges found in this mini-batch")
 
         edge_index = edge_index_dict[rev_etype]
-        # Derive scalar edge weights from edge attributes (fallback to ones)
-        edge_attr = None
-        if hasattr(self, "edge_mlp"):
-            # Edge attributes should be present in the HeteroData for rev_interacts
-            # If missing, default to ones
-            edge_attr = x_dict.get("__edge_attr_cache__", None)
-        # Extract edge_attr from the dedicated store if available
-        # Access pattern: It is stored on the batch object, not in x_dict, so we cannot fetch here.
-        # Instead, rely on the LinkNeighborLoader keeping edge_attr in the store; PyG SAGEConv expects
-        # edge_weight as a tensor aligned with edge_index.
-        # We fetch from edge_index_dict via a side channel is not available, so we rely on a convention:
-        # The caller passes a batch where rev_interacts store has 'edge_attr'.
-        # To keep this module self-contained, we will not depend on x_dict; instead, we look up a parallel
-        # structure passed in during forward via a special key on edge_index_dict if provided.
-        # If not provided, we compute uniform weights.
-        edge_weight = None
+        # Optional: derive scalar edge weights from edge attributes via MLP.
+        # Current SAGEConv version here does not accept edge_weight; we compute but do not pass it.
         if edge_attr_dict is not None and rev_etype in edge_attr_dict:
-            ea = edge_attr_dict[rev_etype]
-            if ea.dim() == 1:
-                edge_weight = ea
-            else:
-                edge_weight = self.edge_mlp(ea).view(-1)
-        else:
-            edge_weight = None  # uniform weights
+            ea = edge_attr_dict[rev_etype]  # [E, 3]
+            if ea.dim() == 2 and ea.size(-1) == 3:
+                _ = self.edge_mlp(ea).view(-1)  # reserved for future use
 
         u = self.conv1(
             (x_dict["subreddit"], x_dict["user"]),
             edge_index,
-            edge_weight=edge_weight,
         ).relu()
         u = self.conv2(
             (x_dict["subreddit"], u),
             edge_index,
-            edge_weight=edge_weight,
         )
 
         x_dict["user"] = F.normalize(u, dim=-1)
