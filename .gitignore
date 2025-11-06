@@ -33,3 +33,4 @@ data/
 todo
 wandb/
 .cursor/
+**__pycache__**

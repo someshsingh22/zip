@@ -4,6 +4,7 @@ from torch_geometric.loader import LinkNeighborLoader
 from torch_geometric.utils import negative_sampling
 from src.gnn import UserSubredditSAGE, DotPredictor
 from tqdm.auto import tqdm
+import wandb
 
 DATA_PATH = "dataset.pt"
 DEVICE = "cuda:0"
@@ -12,6 +13,21 @@ FANOUT = [15, 10]
 BATCH_SIZE = 1_000_000
 EPOCHS = 3
 LR = 1e-3
+
+wandb.init(
+    project="zip-gnn",
+    config={
+        "data_path": DATA_PATH,
+        "device": DEVICE,
+        "hidden_dim": HIDDEN_DIM,
+        "fanout": FANOUT,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "model": "UserSubredditSAGE",
+        "predictor": "DotPredictor",
+    },
+)
 
 print("Loading dataset...")
 data = torch.load(DATA_PATH, map_location="cpu", weights_only=False).pin_memory()
@@ -32,7 +48,7 @@ loader = LinkNeighborLoader(
     pin_memory=True,
 )
 
-def train_one_epoch(loader, epoch, total_pos_edges: int):
+def train_one_epoch(loader: LinkNeighborLoader, epoch: int, total_pos_edges: int):
     total_loss = 0
     total_pos = 0
     pbar = tqdm(total=total_pos_edges, desc=f"Epoch {epoch:02d}", unit="edge")
@@ -70,7 +86,20 @@ def train_one_epoch(loader, epoch, total_pos_edges: int):
         remaining = max(total_pos_edges - total_pos, 0)
         pbar.update(pos_src.size(0))
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "remaining": f"{remaining:,}"})
-    return total_loss / max(total_pos, 1)
+        wandb.log(
+            {
+                "train/loss": loss.item(),
+                "train/lr": optimizer.param_groups[0]["lr"],
+            }
+        )
+    avg_loss = total_loss / max(total_pos, 1)
+    wandb.log(
+        {
+            "train/epoch_avg_loss": avg_loss,
+            "train/epoch": epoch,
+        }
+    )
+    return avg_loss
 
 for epoch in range(1, EPOCHS + 1):
     model.train()
@@ -78,3 +107,4 @@ for epoch in range(1, EPOCHS + 1):
 
 torch.save(model.state_dict(), "model.pt")
 print("✅ Model saved.")
+wandb.finish()
