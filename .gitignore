@@ -31,3 +31,5 @@ data/
 .cursorrules
 *.log
 todo
+wandb/
+.cursor/
