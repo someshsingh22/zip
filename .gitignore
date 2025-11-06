@@ -31,3 +31,4 @@ data/
 .cursorrules
 *.log
 todo
+wandb/
