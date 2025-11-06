@@ -1,0 +1,29 @@
+seed: 42
+
+data:
+  dataset_path: dataset.pt
+
+device: cuda:0
+amp:
+  enabled: true
+  dtype: bfloat16
+
+model:
+  name: UserSubredditSAGE
+  input_dim: 3072
+  hidden_dim: 512
+
+loader:
+  fanout: [15, 10]
+  batch_size: 1000000
+  edge_type: ["user", "interacts", "subreddit"]
+
+train:
+  epochs: 3
+  lr: 0.001
+
+logging:
+  wandb_project: zip-gnn
+  log_every: 50
+
+

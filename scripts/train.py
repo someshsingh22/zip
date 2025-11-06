@@ -5,23 +5,41 @@ from torch_geometric.utils import negative_sampling
 from src.gnn import UserSubredditSAGE, DotPredictor
 from tqdm.auto import tqdm
 import wandb
+from omegaconf import OmegaConf
+import argparse
+import random
+import numpy as np
 
-DATA_PATH = "dataset.pt"
-DEVICE = "cuda:0"
-HIDDEN_DIM = 512
-FANOUT = [15, 10]
-BATCH_SIZE = 1_000_000
-EPOCHS = 3
-LR = 1e-3
-WANDB_PROJECT = "zip-gnn"
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", type=str, default="configs/train.yaml")
+args = parser.parse_args()
+
+cfg = OmegaConf.load(args.config)
+
+# Reproducibility
+torch.manual_seed(int(cfg.seed))
+random.seed(int(cfg.seed))
+np.random.seed(int(cfg.seed))
+
+DATA_PATH = str(cfg.data.dataset_path)
+DEVICE = str(cfg.device)
+HIDDEN_DIM = int(cfg.model.hidden_dim)
+FANOUT = list(cfg.loader.fanout)
+BATCH_SIZE = int(cfg.loader.batch_size)
+EPOCHS = int(cfg.train.epochs)
+LR = float(cfg.train.lr)
+EDGE_TYPE = tuple(cfg.loader.edge_type)
+WANDB_PROJECT = str(cfg.logging.wandb_project)
+AMP_ENABLED = bool(cfg.amp.enabled) and DEVICE.startswith("cuda")
+AMP_DTYPE = torch.bfloat16 if str(cfg.amp.dtype).lower() == "bfloat16" else torch.float16
 
 print("Loading dataset...")
 data = torch.load(DATA_PATH, map_location="cpu", weights_only=False).pin_memory()
 
-model = UserSubredditSAGE(input_dim=3072, hidden_dim=HIDDEN_DIM).to(DEVICE)
+model = UserSubredditSAGE(input_dim=int(cfg.model.input_dim), hidden_dim=HIDDEN_DIM).to(DEVICE)
 predictor = DotPredictor().to(DEVICE)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-scaler = torch.amp.GradScaler('cuda', enabled=True)
+scaler = torch.amp.GradScaler('cuda', enabled=AMP_ENABLED)
 
 # Initialize Weights & Biases for experiment tracking
 wandb.init(
@@ -36,6 +54,8 @@ wandb.init(
         "lr": LR,
         "model": "UserSubredditSAGE",
         "predictor": "DotPredictor",
+        "amp_enabled": AMP_ENABLED,
+        "amp_dtype": str(cfg.amp.dtype),
     },
 )
 # Track gradients/parameters lightly
@@ -43,11 +63,10 @@ wandb.watch(model, log="gradients", log_freq=100, log_graph=False)
 
 global_step = 0
 
-edge_type = ("user", "interacts", "subreddit")
 loader = LinkNeighborLoader(
     data,
     num_neighbors=FANOUT,
-    edge_label_index=edge_type,
+    edge_label_index=EDGE_TYPE,
     batch_size=BATCH_SIZE,
     shuffle=True,
     pin_memory=True,
@@ -60,16 +79,16 @@ def train_one_epoch(loader, epoch):
     pbar = tqdm(loader, desc=f"Epoch {epoch:02d} | EdgeType: interacts", unit="batch")
     for batch in pbar:
         batch = batch.to(DEVICE, non_blocking=True)
-        pos_src, pos_dst = batch[("user", "interacts", "subreddit")].edge_label_index
+        pos_src, pos_dst = batch[EDGE_TYPE].edge_label_index
         neg_src, neg_dst = negative_sampling(
-            edge_index=batch[("user", "interacts", "subreddit")].edge_index,
+            edge_index=batch[EDGE_TYPE].edge_index,
             num_nodes=(batch["user"].num_nodes, batch["subreddit"].num_nodes),
             num_neg_samples=pos_src.size(0),
             method='sparse'
         )
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda', dtype=AMP_DTYPE, enabled=AMP_ENABLED):
             # Provide edge attributes for rev_interacts to compute MLP-based weights
             rev_store = batch[("subreddit", "rev_interacts", "user")]
             edge_attr_dict = {
