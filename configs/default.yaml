@@ -13,7 +13,7 @@ training:
   batch_size: 10000
   epochs: 3
   lr: 5e-4
-  lr_gamma: 0.5  # multiplicative decay per epoch (StepLR)
+  warmup_ratio: 0.05  # fraction of total steps for linear warmup
 
 checkpoint:
   dir: "checkpoints"

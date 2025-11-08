@@ -9,6 +9,7 @@ from src.gnn import UserSubredditSAGE, DotPredictor
 from tqdm.auto import tqdm
 import wandb
 from omegaconf import OmegaConf
+import math
 
 parser = argparse.ArgumentParser(description="Train GNN with YAML config.")
 parser.add_argument(
@@ -44,13 +45,6 @@ optimizer = torch.optim.Adam(
 )
 scaler = torch.amp.GradScaler('cuda', enabled=True)
 
-# LR scheduler (epoch-wise StepLR)
-scheduler = torch.optim.lr_scheduler.StepLR(
-    optimizer,
-    step_size=1,
-    gamma=float(cfg.training.get("lr_gamma", 0.5)),
-)
-
 # Checkpointing setup
 ckpt_cfg = cfg.get("checkpoint", {})
 ckpt_dir = Path(ckpt_cfg.get("dir", "checkpoints"))
@@ -60,6 +54,24 @@ save_every_steps: int = int(ckpt_cfg.get("save_every_steps", 100))
 edge_type = ("user", "interacts", "subreddit")
 # For heterogeneous graphs, provide per-edge-type fanout explicitly to avoid sampler mapping asserts
 hetero_fanout = {et: list(cfg.sampler.fanout) for et in data.edge_types}
+
+# LR scheduler: per-step linear warmup -> cosine decay
+full_pos_edge_index_for_sched = data[edge_type].edge_index
+num_users_for_sched = int(data["user"].num_nodes)
+deg_for_sched = torch.bincount(full_pos_edge_index_for_sched[0], minlength=num_users_for_sched)
+num_valid_users_for_sched = int((deg_for_sched > 0).sum().item())
+steps_per_epoch = (num_valid_users_for_sched + cfg.training.batch_size - 1) // cfg.training.batch_size
+total_steps = max(1, steps_per_epoch * cfg.training.epochs)
+warmup_ratio = float(cfg.training.get("warmup_ratio", 0.05))
+warmup_steps = max(1, int(warmup_ratio * total_steps))
+
+def warmup_cosine_lambda(current_step: int) -> float:
+    if current_step < warmup_steps:
+        return float(current_step) / float(max(1, warmup_steps))
+    progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_cosine_lambda)
 
 def sample_one_positive_per_user(edge_index: torch.Tensor, num_users: int) -> torch.Tensor:
     """Uniform over users: pick one positive subreddit per user (if degree>0)."""
@@ -117,6 +129,7 @@ def train_one_epoch(
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        scheduler.step()
 
         # Increment global step and checkpoint periodically
         global_step += 1
@@ -192,9 +205,6 @@ for epoch in range(1, cfg.training.epochs + 1):
             },
             best_path,
         )
-
-    # Step LR scheduler at epoch boundary
-    scheduler.step()
 
 torch.save(model.state_dict(), "model.pt")
 print("✅ Model saved.")
