@@ -4,16 +4,18 @@ from torch_geometric.nn import GATv2Conv
 
 
 class UserSubredditSAGE(torch.nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int):
+    def __init__(self, input_dim: int, hidden_dim: int, residual: bool = True):
         """GraphSAGE encoder for user-subject interactions.
 
         Args:
             input_dim: Dimensionality of subreddit input features.
             hidden_dim: Hidden/channel size for projections and SAGE layers.
+            residual: Whether to add residual connections between graph layers.
         """
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.residual = bool(residual)
         self.sub_proj = torch.nn.Sequential(torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU())
         self.user_proj = torch.nn.Sequential(torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU())
         # Use GATv2 with multi-head attention; keep output size == hidden_dim
@@ -63,18 +65,24 @@ class UserSubredditSAGE(torch.nn.Module):
             ea = edge_attr_dict[rev_etype]  # [E, 2]
             if ea is not None and ea.dim() == 2:
                 edge_attr = ea
-
-        u = self.conv1(
+        # Layer 1
+        u1 = self.conv1(
             (x_dict["subreddit"], x_dict["user"]),
             edge_index,
             edge_attr=edge_attr,
-        ).relu()
-        u = self.conv2(
-            (x_dict["subreddit"], u),
+        )
+        if self.residual:
+            u1 = u1 + x_dict["user"]
+        u1 = u1.relu()
+        # Layer 2
+        u2 = self.conv2(
+            (x_dict["subreddit"], u1),
             edge_index,
             edge_attr=edge_attr,
         )
-        x_dict["user"] = F.normalize(u, dim=-1)
+        if self.residual:
+            u2 = u2 + u1
+        x_dict["user"] = F.normalize(u2, dim=-1)
         return x_dict
 
 

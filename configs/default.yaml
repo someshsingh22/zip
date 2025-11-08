@@ -1,9 +1,10 @@
 data_path: "dataset.pt"
-device: "cuda:5"
+device: "cuda:3"
 
 model:
   input_dim: 3072 # Fixed as OpenAI Embedding size
   hidden_dim: 512
+  residual: true
 
 sampler:
   fanout: [100, 100]

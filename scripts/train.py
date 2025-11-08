@@ -35,6 +35,7 @@ device = cfg.device
 model = UserSubredditSAGE(
     input_dim=cfg.model.input_dim,
     hidden_dim=cfg.model.hidden_dim,
+    residual=cfg.model.get("residual", True),
 ).to(device)
 predictor = DotPredictor(proj_dim=cfg.model.hidden_dim).to(device)
 optimizer = torch.optim.Adam(
