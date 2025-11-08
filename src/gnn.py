@@ -1,26 +1,7 @@
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import SAGEConv
-from torch_geometric.utils import scatter
+from torch_geometric.nn import GATv2Conv
 
-
-class WeightedSAGEConv(SAGEConv):
-    def forward(self, x, edge_index, edge_weight=None, size=None):
-        if self.project and hasattr(self, 'lin'):
-            x = (self.lin(x[0]).relu(), x[1])
-        self._edge_weight = edge_weight
-        out = self.propagate(edge_index, x=x, size=size)
-        self._edge_weight = None
-        out = self.lin_l(out)
-        x_r = x[1]
-        out = out + self.lin_r(x_r)
-        return out
-
-    def message(self, x_j):
-        w = getattr(self, "_edge_weight", None)
-        if w is None:
-            return x_j
-        return x_j * w.view(-1, 1)
 
 class UserSubredditSAGE(torch.nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int):
@@ -35,17 +16,23 @@ class UserSubredditSAGE(torch.nn.Module):
         self.hidden_dim = hidden_dim
         self.sub_proj = torch.nn.Sequential(torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU())
         self.user_proj = torch.nn.Sequential(torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU())
-        # Use sum aggregation so that passing per-edge normalized weights yields a weighted mean
-        self.conv1 = WeightedSAGEConv((-1, -1), hidden_dim, aggr="sum")
-        self.conv2 = WeightedSAGEConv((-1, -1), hidden_dim, aggr="sum")
-        self.conv3 = WeightedSAGEConv((-1, -1), hidden_dim, aggr="sum")
-        # Maps [norm_log_total_count, comment_frac] -> positive scalar weight
-        mlp_hidden = max(32, hidden_dim // 4)
-        self.edge_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2, mlp_hidden),
-            torch.nn.ReLU(),
-            torch.nn.Linear(mlp_hidden, 1),
-            torch.nn.Softplus(),  # ensures positive weights
+        # Use GATv2 with multi-head attention; keep output size == hidden_dim
+        # Set add_self_loops=False for bipartite edges
+        self.conv1 = GATv2Conv(
+            (-1, -1),
+            hidden_dim,
+            heads=4,
+            concat=False,
+            add_self_loops=False,
+            edge_dim=2,
+        )
+        self.conv2 = GATv2Conv(
+            (-1, -1),
+            hidden_dim,
+            heads=4,
+            concat=False,
+            add_self_loops=False,
+            edge_dim=2,
         )
 
     def forward(self, x_dict, edge_index_dict, edge_attr_dict=None):
@@ -70,31 +57,22 @@ class UserSubredditSAGE(torch.nn.Module):
         rev_etype = ("subreddit", "rev_interacts", "user")
 
         edge_index = edge_index_dict[rev_etype]
-        edge_weight = None
-        # Derive scalar edge weights from edge attributes via MLP and normalize per-destination (user)
+        edge_attr = None
+        # Provide raw edge attributes directly to GATv2 (edge_dim=2)
         if edge_attr_dict is not None and rev_etype in edge_attr_dict:
             ea = edge_attr_dict[rev_etype]  # [E, 2]
-            if ea.dim() == 2 and ea.size(-1) == 2:
-                raw_w = self.edge_mlp(ea).view(-1)  # [E], positive
-                dst = edge_index[1]
-                # Normalize so that sum of weights into each dst node is 1.0
-                denom = scatter(raw_w, dst, dim=0, dim_size=x_dict["user"].size(0), reduce="sum")
-                edge_weight = raw_w / (denom[dst] + 1e-12)
+            if ea is not None and ea.dim() == 2:
+                edge_attr = ea
 
         u = self.conv1(
             (x_dict["subreddit"], x_dict["user"]),
             edge_index,
-            edge_weight=edge_weight,
+            edge_attr=edge_attr,
         ).relu()
         u = self.conv2(
             (x_dict["subreddit"], u),
             edge_index,
-            edge_weight=edge_weight,
-        ).relu()
-        u = self.conv3(
-            (x_dict["subreddit"], u),
-            edge_index,
-            edge_weight=edge_weight,
+            edge_attr=edge_attr,
         )
         x_dict["user"] = F.normalize(u, dim=-1)
         return x_dict
@@ -113,25 +91,16 @@ class DotPredictor(torch.nn.Module):
         self.logit_scale = torch.nn.Parameter(torch.tensor(init_logit_scale))
         self.max_logit_scale = float(max_logit_scale)
         self.proj_dim = proj_dim
-        if proj_dim is None:
-            self.user_head = torch.nn.Identity()
-            self.sub_head = torch.nn.Identity()
-        else:
-            if use_mlp:
-                self.user_head = torch.nn.Sequential(
-                    torch.nn.Linear(proj_dim, proj_dim, bias=True),
-                    torch.nn.ReLU(),
-                    torch.nn.Linear(proj_dim, proj_dim, bias=True),
-                )
-                self.sub_head = torch.nn.Sequential(
-                    torch.nn.Linear(proj_dim, proj_dim, bias=True),
-                    torch.nn.ReLU(),
-                    torch.nn.Linear(proj_dim, proj_dim, bias=True),
-                )
-            else:
-                self.user_head = torch.nn.Linear(proj_dim, proj_dim, bias=True)
-                self.sub_head = torch.nn.Linear(proj_dim, proj_dim, bias=True)
-
+        self.user_head = torch.nn.Sequential(
+            torch.nn.Linear(proj_dim, proj_dim, bias=True),
+            torch.nn.ReLU(),
+            torch.nn.Linear(proj_dim, proj_dim, bias=True),
+        )
+        self.sub_head = torch.nn.Sequential(
+            torch.nn.Linear(proj_dim, proj_dim, bias=True),
+            torch.nn.ReLU(),
+            torch.nn.Linear(proj_dim, proj_dim, bias=True),
+        )
     def forward(self, src, dst):
         # Pairwise aligned scores (vector). For matrix scores, do src @ dst.t() externally.
         q = F.normalize(self.user_head(src), dim=-1)
