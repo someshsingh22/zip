@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+import polars as pl
 import torch
 
 # Local imports
@@ -19,7 +20,7 @@ class UserInteractions:
     """Container for a single user's subreddit interaction counts.
 
     Attributes:
-        subreddit_ids: Global subreddit ids (as used in dataset.pt).
+        subreddit_ids: Global subreddit ids (contiguous [0..n_subs-1] for current parquet inputs).
         post_counts: Number of posts to each subreddit (same length as subreddit_ids).
         comment_counts: Number of comments to each subreddit (same length as subreddit_ids).
     """
@@ -38,25 +39,6 @@ class UserInteractions:
         return len(self.subreddit_ids)
 
 
-def load_subreddit_features(dataset_path: str, device: torch.device) -> torch.Tensor:
-    """Load subreddit embedding matrix from dataset.pt.
-
-    Args:
-        dataset_path: Path to dataset file produced by scripts/prepare_data.py.
-        device: Target device for the returned tensor.
-
-    Returns:
-        Tensor of shape [num_subreddits, emb_dim] in float32 on the given device.
-    """
-    logger.info("Loading dataset from %s", dataset_path)
-    data = torch.load(dataset_path, map_location=device)
-    sub_x = data["subreddit"].x
-    # Ensure float32 for Linear layers
-    sub_x = sub_x.to(device=device).float()
-    logger.info("Loaded subreddit features: shape=%s dtype=%s", tuple(sub_x.shape), sub_x.dtype)
-    return sub_x
-
-
 def _build_batch_graph(
     sub_x_full: torch.Tensor,
     batch_interactions: Sequence[UserInteractions],
@@ -66,14 +48,6 @@ def _build_batch_graph(
 
     We keep only the subreddits referenced by this batch to reduce compute,
     remapping their global ids to a local contiguous range.
-
-    Edge attributes follow the training shape (2D):
-      - feature[0] = log(1 + total_count) / max(sqrt(user_total), 1e-12)
-      - feature[1] = comment_frac = comment_count / max(total_count, 1)
-
-    Note: We omit the global subreddit normalization factor (sqrt(sub_total)).
-    This preserves feature semantics and shape while avoiding additional
-    dataset scans during inference.
 
     Args:
         sub_x_full: Subreddit embedding matrix from dataset.pt (float32).
@@ -165,7 +139,7 @@ def batch_user_embeddings(
 
     Args:
         model: Trained UserSubredditSAGE model (evaluation mode recommended).
-        subreddit_features: Full subreddit embedding matrix from dataset.pt (float32).
+        subreddit_features: Full subreddit embedding matrix (float32).
         interactions: Iterable of user interaction objects, one per user.
         device: Torch device for inference. Defaults to model's device if None.
         max_users_per_batch: Maximum number of users per forward pass.
@@ -227,42 +201,154 @@ def _load_model_from_checkpoint(
     return model
 
 
-def _read_json_interactions(path: str) -> List[UserInteractions]:
-    """Read a JSON file containing a list of users' interactions.
+def _read_parquets_build_graph_inputs(
+    posts_file: str,
+    comments_file: str,
+) -> Tuple[List[UserInteractions], List[str], np.ndarray, np.ndarray]:
+    """Load two parquet files and build per-user interaction lists and totals.
 
-    Expected schema:
-      [
-        {
-          "subreddit_ids": [12, 57, ...],
-          "post_counts": [3, 1, ...],
-          "comment_counts": [7, 0, ...]
-        },
-        ...
-      ]
+    The two parquets must have columns: 'author', 'subreddit', 'total_count'.
+
+    Returns:
+        interactions: List[UserInteractions] ordered by user_id ascending.
+        all_subs: List of subreddit names ordered by sub_id ascending.
+        user_total_by_user: np.ndarray [n_users] of total activity per user.
+        sub_total_by_sub: np.ndarray [n_subs] of total activity per subreddit.
     """
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    interactions: List[UserInteractions] = []
-    for item in raw:
-        interactions.append(
-            UserInteractions(
-                subreddit_ids=item["subreddit_ids"],
-                post_counts=item["post_counts"],
-                comment_counts=item["comment_counts"],
+    logger.info("Loading Parquet files: posts=%s, comments=%s", posts_file, comments_file)
+    posts_df = pl.read_parquet(posts_file)
+    comments_df = pl.read_parquet(comments_file)
+
+    # Build categorical mappings (contiguous ids)
+    all_users = pl.concat([posts_df["author"], comments_df["author"]]).unique()
+    user_map = pl.DataFrame(
+        {
+            "author": all_users,
+            "user_id": pl.arange(0, all_users.len(), eager=True, dtype=pl.Int32),
+        }
+    )
+
+    all_subs = pl.concat([posts_df["subreddit"], comments_df["subreddit"]]).unique()
+    sub_map = pl.DataFrame(
+        {
+            "subreddit": all_subs,
+            "sub_id": pl.arange(0, all_subs.len(), eager=True, dtype=pl.Int32),
+        }
+    )
+
+    def _map_edges(df: pl.DataFrame, count_col: str) -> pl.DataFrame:
+        return (
+            df.join(user_map, on="author", how="inner")
+            .join(sub_map, on="subreddit", how="inner")
+            .select(
+                [
+                    pl.col("user_id").alias("user_id"),
+                    pl.col("sub_id").alias("sub_id"),
+                    pl.col("total_count").alias(count_col),
+                ]
             )
         )
-    return interactions
+
+    post_edges = _map_edges(posts_df, "post_count")
+    comm_edges = _map_edges(comments_df, "comment_count")
+    combined = post_edges.join(comm_edges, on=["user_id", "sub_id"], how="outer").fill_null(0)
+    combined = combined.with_columns([(pl.col("post_count") + pl.col("comment_count")).alias("total_count")])
+    combined = combined.with_columns(
+        [
+            pl.when(pl.col("total_count") > 0)
+            .then(pl.col("comment_count") / pl.col("total_count"))
+            .otherwise(0.0)
+            .alias("comment_frac")
+        ]
+    )
+
+    # Totals per user and per subreddit
+    user_activity = combined.group_by("user_id").agg(pl.col("total_count").sum().alias("user_total"))
+    sub_activity = combined.group_by("sub_id").agg(pl.col("total_count").sum().alias("sub_total"))
+    combined = combined.join(user_activity, on="user_id", how="left").join(sub_activity, on="sub_id", how="left")
+
+    # Create per-user lists
+    grouped = (
+        combined.sort(["user_id", "sub_id"])
+        .group_by("user_id")
+        .agg(
+            [
+                pl.col("sub_id").alias("sub_id_list"),
+                pl.col("post_count").alias("post_count_list"),
+                pl.col("comment_count").alias("comment_count_list"),
+                pl.col("total_count").alias("total_count_list"),
+                pl.col("user_total").first().alias("user_total_scalar"),
+            ]
+        )
+        .sort("user_id")
+    )
+
+    interactions: List[UserInteractions] = []
+    # Convert to lists for Python side
+    for row in grouped.iter_rows(named=True):
+        subs = list(row["sub_id_list"])
+        posts = list(row["post_count_list"])
+        comms = list(row["comment_count_list"])
+        interactions.append(UserInteractions(subreddit_ids=subs, post_counts=posts, comment_counts=comms))
+
+    # Extract totals arrays aligned with id ordering
+    n_users = all_users.len()
+    n_subs = all_subs.len()
+    user_total_by_user = np.zeros((n_users,), dtype=np.float32)
+    # Build user_total array
+    user_totals_df = user_activity.sort("user_id")
+    user_total_by_user[: user_totals_df.height] = user_totals_df["user_total"].to_numpy().astype(np.float32)
+    # Build sub_total array
+    sub_total_by_sub = np.zeros((n_subs,), dtype=np.float32)
+    sub_totals_df = sub_activity.sort("sub_id")
+    sub_total_by_sub[: sub_totals_df.height] = sub_totals_df["sub_total"].to_numpy().astype(np.float32)
+
+    # Return also the subreddit names in id order
+    all_subs_list = list(all_subs)
+    return interactions, all_subs_list, user_total_by_user, sub_total_by_sub
+
+
+def _load_subreddit_embeddings_from_dict(
+    all_subs: Sequence[str],
+    emb_npy_path: str,
+    device: torch.device,
+) -> torch.Tensor:
+    """Load subreddit embeddings dict (.npy) and build matrix aligned to sub_id ordering."""
+    logger.info("Loading subreddit embeddings dict from %s", emb_npy_path)
+    sub_emb_dict = np.load(emb_npy_path, allow_pickle=True).item()
+    dim = None
+    # Probe first present embedding to get dimension
+    for name in all_subs:
+        emb = sub_emb_dict.get(name, None)
+        if emb is not None:
+            dim = int(np.asarray(emb).shape[-1])
+            break
+    if dim is None:
+        raise ValueError("No subreddit embeddings found for provided subreddit list.")
+
+    mat = np.zeros((len(all_subs), dim), dtype=np.float32)
+    missing = 0
+    for i, name in enumerate(all_subs):
+        emb = sub_emb_dict.get(name, None)
+        if emb is not None:
+            mat[i] = np.asarray(emb, dtype=np.float32)
+        else:
+            missing += 1
+    if missing:
+        logger.warning("%d subreddits missing embeddings; filled with zeros.", missing)
+    return torch.from_numpy(mat).to(device=device, dtype=torch.float32)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Batched user embedding inference from subreddit interactions.")
-    parser.add_argument("--dataset", type=str, required=True, help="Path to dataset.pt produced by prepare_data.py")
+    parser = argparse.ArgumentParser(description="Batched user embedding inference from two parquet files (posts/comments).")
+    parser.add_argument("--posts", type=str, required=True, help="Path to posts parquet (columns: author, subreddit, total_count)")
+    parser.add_argument("--comments", type=str, required=True, help="Path to comments parquet (columns: author, subreddit, total_count)")
+    parser.add_argument("--subreddit-emb", type=str, required=True, help="Path to subreddit_embeddings.npy (dict: name -> vector)")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained model checkpoint")
     parser.add_argument("--hidden-dim", type=int, required=True, help="Model hidden size used during training")
     parser.add_argument("--residual", action="store_true", help="Enable residual connections (match training)")
     parser.add_argument("--input-dim", type=int, default=3072, help="Subreddit embedding input dimension (default 3072)")
-    parser.add_argument("--json", type=str, required=True, help="Path to JSON file with user interactions")
-    parser.add_argument("--out", type=str, required=True, help="Output .npy file to save embeddings")
+    parser.add_argument("--out", type=str, required=True, help="Output .npy file to save embeddings (ordered by user_id)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--log-level", type=str, default="INFO")
@@ -271,7 +357,14 @@ def main() -> None:
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s - %(levelname)s - %(message)s")
 
     device = torch.device(args.device)
-    sub_x = load_subreddit_features(args.dataset, device=device)
+
+    # Read parquet inputs and construct interactions + totals
+    interactions, all_subs, user_total_by_user, sub_total_by_sub = _read_parquets_build_graph_inputs(
+        args.posts, args.comments
+    )
+    # Load subreddit embeddings aligned with sub_id ordering
+    sub_x = _load_subreddit_embeddings_from_dict(all_subs, args.subreddit_emb, device=device)
+
     model = _load_model_from_checkpoint(
         checkpoint_path=args.checkpoint,
         input_dim=args.input_dim,
@@ -279,11 +372,11 @@ def main() -> None:
         residual=bool(args.residual),
         device=device,
     )
-    inter = _read_json_interactions(args.json)
+
     emb = batch_user_embeddings(
         model=model,
         subreddit_features=sub_x,
-        interactions=inter,
+        interactions=interactions,
         device=device,
         max_users_per_batch=int(args.batch_size),
     )
