@@ -26,4 +26,11 @@ wandb:
   enabled: true
 
 
+text_contrastive:
+  enabled: true
+  author_emb_path: "data/reddit/author_title_embeddings.npy"
+  users_csv: "data/reddit/user_index_map.csv"
+  weight: 1.0
+  max_pairs_per_batch: 2048
+
 

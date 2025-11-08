@@ -57,7 +57,9 @@ def embed_and_save(
     """
     pairs = _load_parquet(parquet_path, name_column, text_column)
     if len(pairs) == 0:
-        logger.warning("No rows with non-empty '%s' found in %s", text_column, parquet_path)
+        logger.warning(
+            "No rows with non-empty '%s' found in %s", text_column, parquet_path
+        )
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         np.save(output_path, {}, allow_pickle=True)
         return
@@ -82,7 +84,9 @@ def embed_and_save(
                 if dimensions is not None:
                     kwargs["dimensions"] = int(dimensions)
                 resp = litellm_embedding(**kwargs)
-                vecs = [np.asarray(d["embedding"], dtype=np.float32) for d in resp["data"]]
+                vecs = [
+                    np.asarray(d["embedding"], dtype=np.float32) for d in resp["data"]
+                ]
                 mat = np.stack(vecs, axis=0)
                 mat = _l2_normalize(mat)
                 all_vecs.append(mat)
@@ -91,7 +95,7 @@ def embed_and_save(
                 attempt += 1
                 if attempt > max_retries:
                     raise
-                sleep_s = retry_backoff ** attempt
+                sleep_s = retry_backoff**attempt
                 logger.warning("Batch embed failed (%s). Retrying in %.1fs", e, sleep_s)
                 time.sleep(sleep_s)
         pbar.update(len(batch_texts))
@@ -130,23 +134,45 @@ def parse_args() -> argparse.Namespace:
         default="data/processed/subreddit_embeddings.npy",
         help="Output .npy file (np.save of dict[name] = embedding).",
     )
-    parser.add_argument("--name-column", type=str, default="display_name", help="Name column in parquet.")
-    parser.add_argument("--text-column", type=str, default="description", help="Text column in parquet.")
+    parser.add_argument(
+        "--name-column",
+        type=str,
+        default="display_name",
+        help="Name column in parquet.",
+    )
+    parser.add_argument(
+        "--text-column", type=str, default="description", help="Text column in parquet."
+    )
     parser.add_argument(
         "--model",
         type=str,
         default="openai/text-embedding-3-large",
         help="LiteLLM model id, e.g., openai/text-embedding-3-large",
     )
-    parser.add_argument("--batch-size", type=int, default=128, help="Batch size for embedding API calls.")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+        help="Batch size for embedding API calls.",
+    )
     parser.add_argument(
         "--dimensions",
         type=int,
         default=None,
         help="Optional target embedding dimension if the model supports it.",
     )
-    parser.add_argument("--max-retries", type=int, default=5, help="Max retries per batch on transient failures.")
-    parser.add_argument("--retry-backoff", type=float, default=2.0, help="Exponential backoff base seconds.")
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=5,
+        help="Max retries per batch on transient failures.",
+    )
+    parser.add_argument(
+        "--retry-backoff",
+        type=float,
+        default=2.0,
+        help="Exponential backoff base seconds.",
+    )
     return parser.parse_args()
 
 

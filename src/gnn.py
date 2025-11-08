@@ -16,8 +16,12 @@ class UserSubredditSAGE(torch.nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.residual = bool(residual)
-        self.sub_proj = torch.nn.Sequential(torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU())
-        self.user_proj = torch.nn.Sequential(torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU())
+        self.sub_proj = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU()
+        )
+        self.user_proj = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU()
+        )
         # Use GATv2 with multi-head attention; keep output size == hidden_dim
         # Set add_self_loops=False for bipartite edges
         self.conv1 = GATv2Conv(
@@ -52,7 +56,14 @@ class UserSubredditSAGE(torch.nn.Module):
                 elif dst_type == "user":
                     max_uid = max(max_uid, int(edge_index[1].max()) + 1)
             # Initialize with normal distribution
-            x_dict["user"] = torch.randn((max_uid, self.input_dim), dtype=x_dict["subreddit"].dtype, device=x_dict["subreddit"].device) * 0.01
+            x_dict["user"] = (
+                torch.randn(
+                    (max_uid, self.input_dim),
+                    dtype=x_dict["subreddit"].dtype,
+                    device=x_dict["subreddit"].device,
+                )
+                * 0.01
+            )
         x_dict["user"] = F.normalize(self.user_proj(x_dict["user"]), dim=-1)
 
         # Message passing over unified 'interacts' edges, reversed to output user embeddings.
@@ -109,6 +120,7 @@ class DotPredictor(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(proj_dim, proj_dim, bias=True),
         )
+
     def forward(self, src, dst):
         # Pairwise aligned scores (vector). For matrix scores, do src @ dst.t() externally.
         q = F.normalize(self.user_head(src), dim=-1)
@@ -116,9 +128,35 @@ class DotPredictor(torch.nn.Module):
         scale = self.logit_scale.clamp(max=self.max_logit_scale).exp()
         return scale * (q * k).sum(dim=-1)
 
-    def compute_logits(self, src_batch: torch.Tensor, dst_batch: torch.Tensor, base_tau: float = 1.0) -> torch.Tensor:
+    def compute_logits(
+        self, src_batch: torch.Tensor, dst_batch: torch.Tensor, base_tau: float = 1.0
+    ) -> torch.Tensor:
         """Compute full [B, B] logits with projections and learnable temperature."""
         q = F.normalize(self.user_head(src_batch), dim=-1)
         k = F.normalize(self.sub_head(dst_batch), dim=-1)
         scale = self.logit_scale.clamp(max=self.max_logit_scale).exp() / float(base_tau)
         return (q @ k.t()) * scale
+
+
+class TextProjector(torch.nn.Module):
+    def __init__(self, input_dim: int, output_dim: int):
+        """Project external text embeddings into the GNN hidden space.
+
+        Args:
+            input_dim: Dimensionality of the input text embeddings.
+            output_dim: Target hidden size to align with user/subreddit embeddings.
+        """
+        super().__init__()
+        self.proj = torch.nn.Linear(input_dim, output_dim, bias=True)
+
+    def forward(self, text_embeddings: torch.Tensor) -> torch.Tensor:
+        """Project and L2-normalize text embeddings.
+
+        Args:
+            text_embeddings: Tensor of shape [N, input_dim].
+
+        Returns:
+            Tensor of shape [N, output_dim], L2-normalized.
+        """
+        x = self.proj(text_embeddings)
+        return F.normalize(x, dim=-1)
