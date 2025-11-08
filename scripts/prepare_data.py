@@ -5,7 +5,7 @@ Creates the HeteroData object with:
 - 'user' and 'subreddit' node types
 - One unified edge type: 'interacts'
 - Edge features per (user, subreddit):
-    [log_total_count, comment_frac, post_frac]
+    [norm_log_total_count, comment_frac]
 Saves to disk as dataset.pt for reuse.
 """
 
@@ -67,7 +67,7 @@ comm_edges = _map_edges(comments_df, "comment_count")
 combined = post_edges.join(comm_edges, on=["user_id", "sub_id"], how="outer")
 combined = combined.fill_null(0)
 
-# Compute totals and fractions; log-normalize total
+# Compute totals and fractions
 combined = combined.with_columns([
     (pl.col("post_count") + pl.col("comment_count")).alias("total_count"),
 ])
@@ -77,9 +77,31 @@ combined = combined.with_columns([
       .otherwise(0.0)
       .alias("comment_frac"),
 ])
+
+# Normalize log(1 + total_count) by sqrt user and subreddit activity
+user_activity = (
+    combined
+    .group_by("user_id")
+    .agg(pl.col("total_count").sum().alias("user_total"))
+)
+sub_activity = (
+    combined
+    .group_by("sub_id")
+    .agg(pl.col("total_count").sum().alias("sub_total"))
+)
+combined = (
+    combined
+    .join(user_activity, on="user_id", how="left")
+    .join(sub_activity, on="sub_id", how="left")
+)
 combined = combined.with_columns([
-    (1.0 - pl.col("comment_frac")).alias("post_frac"),
-    (pl.col("total_count") + 1.0).log().alias("log_total_count"),
+    ((pl.col("user_total").sqrt() * pl.col("sub_total").sqrt())).alias("denom"),
+])
+combined = combined.with_columns([
+    (
+        (pl.col("total_count") + 1.0).log()
+        / pl.when(pl.col("denom") > 0.0).then(pl.col("denom")).otherwise(1e-12)
+    ).alias("norm_log_total_count"),
 ])
 
 # Filter out any zero-total edges (optional but keeps graph compact)
@@ -89,14 +111,13 @@ u = torch.tensor(combined["user_id"].to_numpy(), dtype=torch.long)
 s = torch.tensor(combined["sub_id"].to_numpy(), dtype=torch.long)
 edge_attr_np = np.stack(
     [
-        combined["log_total_count"].to_numpy(),
+        combined["norm_log_total_count"].to_numpy(),
         combined["comment_frac"].to_numpy(),
-        combined["post_frac"].to_numpy(),
     ],
     axis=1,
 ).astype(np.float32)
 edge_attr = torch.from_numpy(edge_attr_np)
-print(f"🧩 interacts: {u.numel():,} edges (features: log_total, comment_frac, post_frac)")
+print(f"🧩 interacts: {u.numel():,} edges (features: norm_log_total_count, comment_frac)")
 
 # ============================================================
 # LOAD SUBREDDIT EMBEDDINGS

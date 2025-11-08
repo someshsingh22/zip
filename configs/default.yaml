@@ -1,0 +1,28 @@
+data_path: "dataset.pt"
+device: "cuda:2"
+
+model:
+  input_dim: 3072 # Fixed as OpenAI Embedding size
+  hidden_dim: 512
+
+sampler:
+  fanout: [100, 100]
+
+training:
+  batch_size: 20000
+  epochs: 3
+  lr: 5e-4
+  lr_gamma: 0.5  # multiplicative decay per epoch (StepLR)
+
+checkpoint:
+  dir: "checkpoints"
+  save_every_steps: 100
+  keep_best: true
+
+wandb:
+  project: "zip-gnn"
+  # Set to false to disable WandB logging
+  enabled: true
+
+
+
