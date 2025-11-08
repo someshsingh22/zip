@@ -1,5 +1,5 @@
 data_path: "dataset.pt"
-device: "cuda:2"
+device: "cuda:5"
 
 model:
   input_dim: 3072 # Fixed as OpenAI Embedding size
