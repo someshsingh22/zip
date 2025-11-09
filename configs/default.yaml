@@ -12,7 +12,7 @@ sampler:
 
 training:
   batch_size: 10000
-  epochs: 3
+  epochs: 30
   lr: 5e-4
   warmup_ratio: 0.05  # fraction of total steps for linear warmup
 
@@ -29,7 +29,7 @@ wandb:
 
 text_contrastive:
   enabled: true
-  author_emb_path: "data/reddit/author_title_embeddings_bge.npy"
+  author_emb_path: "data/reddit/author_title_embeddings_gemma.npy"
   users_csv: "data/reddit/user_index_map.csv"
   weight: 1.0
   max_pairs_per_batch: 2048

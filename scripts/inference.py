@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 import torch
 from tqdm.auto import tqdm
+from omegaconf import OmegaConf
 
 # Local imports
 from src.gnn import RedditGATv2
@@ -185,6 +186,7 @@ def batch_user_embeddings(
     pbar = tqdm(total=total_users, desc="Embedding users", unit="user")
     while start < total_users:
         end = min(start + max_users_per_batch, total_users)
+        batch_size = end - start
         batch = interactions[start:end]
 
         x_dict, eidx_dict, eattr_dict, has_edges = _build_batch_graph(
@@ -204,7 +206,7 @@ def batch_user_embeddings(
 
         results.append(user_emb)
         start = end
-        pbar.update(end - start if end >= start else 0)
+        pbar.update(batch_size)
     pbar.close()
 
     if model_was_training:
@@ -222,11 +224,12 @@ def _load_model_from_checkpoint(
     input_dim: int,
     hidden_dim: int,
     residual: bool,
+    heads: int,
     device: torch.device,
 ) -> RedditGATv2:
     """Utility to instantiate and load a RedditGATv2 from a checkpoint."""
     model = RedditGATv2(
-        input_dim=input_dim, hidden_dim=hidden_dim, residual=residual
+        input_dim=input_dim, hidden_dim=hidden_dim, residual=residual, heads=heads
     ).to(device)
     state = torch.load(checkpoint_path, map_location=device)
     # Allow either raw state_dict or wrapper
@@ -404,6 +407,12 @@ def main() -> None:
         description="Batched user embedding inference from two parquet files (posts/comments)."
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/default.yaml",
+        help="YAML config with model settings (model.input_dim, model.hidden_dim, model.residual).",
+    )
+    parser.add_argument(
         "--posts",
         type=str,
         default="/dev/shm/zip/data/merged_submissions_filtered_gt1_dsp.parquet",
@@ -425,24 +434,6 @@ def main() -> None:
         "--checkpoint", type=str, required=True, help="Path to trained model checkpoint"
     )
     parser.add_argument(
-        "--hidden-dim",
-        type=int,
-        default=512,
-        help="Model hidden size used during training",
-    )
-    parser.add_argument(
-        "--residual",
-        type=bool,
-        default=True,
-        help="Enable residual connections (match training)",
-    )
-    parser.add_argument(
-        "--input-dim",
-        type=int,
-        default=3072,
-        help="Subreddit embedding input dimension (default 3072)",
-    )
-    parser.add_argument(
         "--out",
         type=str,
         required=True,
@@ -460,6 +451,11 @@ def main() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 
+    cfg = OmegaConf.load(args.config)
+    input_dim = int(cfg.model.input_dim)
+    hidden_dim = int(cfg.model.hidden_dim)
+    residual = bool(cfg.model.get("residual", True))
+    heads = int(cfg.model.get("heads", 6))
     device = torch.device(args.device)
 
     # Read parquet inputs and construct interactions + totals
@@ -473,10 +469,11 @@ def main() -> None:
 
     model = _load_model_from_checkpoint(
         checkpoint_path=args.checkpoint,
-        input_dim=args.input_dim,
-        hidden_dim=args.hidden_dim,
-        residual=bool(args.residual),
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        residual=residual,
         device=device,
+        heads=heads,
     )
 
     emb = batch_user_embeddings(
