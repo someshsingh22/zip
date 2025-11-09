@@ -34,3 +34,4 @@ todo
 wandb/
 .cursor/
 **__pycache__**
+checkpoints/

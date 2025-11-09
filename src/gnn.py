@@ -4,13 +4,16 @@ from torch_geometric.nn import GATv2Conv
 
 
 class UserSubredditSAGE(torch.nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, residual: bool = True):
-        """GraphSAGE encoder for user-subject interactions.
+    def __init__(
+        self, input_dim: int, hidden_dim: int, residual: bool = True, heads: int = 5
+    ):
+        """GATv2 encoder for user-subject interactions.
 
         Args:
             input_dim: Dimensionality of subreddit input features.
             hidden_dim: Hidden/channel size for projections and SAGE layers.
             residual: Whether to add residual connections between graph layers.
+            heads: Number of heads for the GATv2Conv layers.
         """
         super().__init__()
         self.input_dim = input_dim
@@ -27,7 +30,7 @@ class UserSubredditSAGE(torch.nn.Module):
         self.conv1 = GATv2Conv(
             (-1, -1),
             hidden_dim,
-            heads=4,
+            heads=heads,
             concat=False,
             add_self_loops=False,
             edge_dim=2,
@@ -35,7 +38,7 @@ class UserSubredditSAGE(torch.nn.Module):
         self.conv2 = GATv2Conv(
             (-1, -1),
             hidden_dim,
-            heads=4,
+            heads=heads,
             concat=False,
             add_self_loops=False,
             edge_dim=2,

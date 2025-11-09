@@ -12,6 +12,8 @@ from omegaconf import OmegaConf
 import math
 import numpy as np
 import polars as pl
+import json
+from datetime import datetime
 
 parser = argparse.ArgumentParser(description="Train GNN with YAML config.")
 parser.add_argument(
@@ -38,7 +40,8 @@ device = cfg.device
 model = UserSubredditSAGE(
     input_dim=cfg.model.input_dim,
     hidden_dim=cfg.model.hidden_dim,
-    residual=cfg.model.get("residual", True),
+    residual=cfg.model.residual,
+    heads=cfg.model.heads,
 ).to(device)
 predictor = DotPredictor(proj_dim=cfg.model.hidden_dim).to(device)
 optimizer = torch.optim.Adam(
@@ -104,6 +107,13 @@ ckpt_cfg = cfg.get("checkpoint", {})
 ckpt_dir = Path(ckpt_cfg.get("dir", "checkpoints"))
 ckpt_dir.mkdir(parents=True, exist_ok=True)
 save_every_steps: int = int(ckpt_cfg.get("save_every_steps", 100))
+run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+run_dir = ckpt_dir / run_ts
+run_dir.mkdir(parents=True, exist_ok=True)
+# Save resolved config for this run
+OmegaConf.save(config=cfg, f=str(run_dir / "config.yaml"))
+with open(run_dir / "config.json", "w") as f:
+    json.dump(cfg_dict, f, indent=2)
 
 edge_type = ("user", "interacts", "subreddit")
 # For heterogeneous graphs, provide per-edge-type fanout explicitly to avoid sampler mapping asserts
@@ -180,6 +190,9 @@ def train_one_epoch(
         pos_src, pos_dst = batch[("user", "interacts", "subreddit")].edge_label_index
 
         optimizer.zero_grad(set_to_none=True)
+        loss_ut = None
+        acc1_val = None
+        mrr_val = None
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             # Provide edge attributes for rev_interacts to compute MLP-based weights
             rev_store = batch[("subreddit", "rev_interacts", "user")]
@@ -200,12 +213,17 @@ def train_one_epoch(
 
             # Optional: user ↔ text contrastive (only for users with text; cap max pairs)
             if use_text and text_proj is not None and text_predictor is not None:
-                # Find indices in this batch that have an associated author text embedding
+                # Map local user indices to global ids, then find available author embeddings
+                user_global = getattr(batch["user"], "n_id", None)
+                if user_global is not None:
+                    pos_src_global = user_global[pos_src].detach().cpu().tolist()
+                else:
+                    # Fallback (shouldn't happen): assume pos_src are global ids
+                    pos_src_global = pos_src.detach().cpu().tolist()
                 idx_author: list[tuple[int, str]] = []
-                pos_src_cpu = pos_src.detach().cpu().tolist()
-                for i, uid in enumerate(pos_src_cpu):
-                    if uid < len(author_by_user_idx):
-                        a = author_by_user_idx[uid]
+                for i, gid in enumerate(pos_src_global):
+                    if 0 <= gid < len(author_by_user_idx):
+                        a = author_by_user_idx[gid]
                         if a and (a in author_to_text_emb):
                             idx_author.append((i, a))
                 if idx_author:
@@ -223,6 +241,16 @@ def train_one_epoch(
                     u_masked = u[sel_idx]
                     logits_ut = text_predictor.compute_logits(u_masked, t, base_tau=tau)
                     labels_ut = torch.arange(u_masked.size(0), device=u_masked.device)
+                    # Metrics (no grad)
+                    with torch.no_grad():
+                        # acc@1
+                        top1 = logits_ut.argmax(dim=1)
+                        acc1_val = float((top1 == labels_ut).float().mean().item())
+                        # MRR
+                        sorted_idx = torch.argsort(logits_ut, dim=1, descending=True)
+                        matches = (sorted_idx == labels_ut.unsqueeze(1)).float()
+                        ranks = matches.argmax(dim=1).float() + 1.0  # 1-based
+                        mrr_val = float((1.0 / ranks).mean().item())
                     loss_ut = F.cross_entropy(logits_ut, labels_ut)
                     loss = loss + text_weight * loss_ut
 
@@ -259,12 +287,15 @@ def train_one_epoch(
                     "train/lr": optimizer.param_groups[0]["lr"],
                 }
             )
-            if (
-                use_text
-                and "loss_ut" in locals()
-                and cfg.get("wandb", {}).get("enabled", True)
-            ):
-                wandb.log({"train/loss_text": float(loss_ut.item())})
+            if use_text and (loss_ut is not None):
+                wandb.log(
+                    {
+                        "train/loss_text": float(loss_ut.item()),
+                        "train/text_pairs": int(labels_ut.size(0)),
+                        "train/text_acc@1": acc1_val,
+                        "train/text_mrr": mrr_val,
+                    }
+                )
     avg_loss = total_loss / max(total_pos, 1)
     if cfg.get("wandb", {}).get("enabled", True):
         wandb.log(
@@ -297,13 +328,13 @@ for epoch in range(1, cfg.training.epochs + 1):
         pin_memory=True,
     )
     avg_loss, global_step = train_one_epoch(
-        loader, epoch, TOTAL_POS_EDGES, global_step, save_every_steps, ckpt_dir
+        loader, epoch, TOTAL_POS_EDGES, global_step, save_every_steps, run_dir
     )
 
     # Save best checkpoint based on epoch average loss
     if ckpt_cfg.get("keep_best", True) and avg_loss < best_epoch_avg_loss:
         best_epoch_avg_loss = avg_loss
-        best_path = ckpt_dir / "best.pt"
+        best_path = run_dir / "best.pt"
         torch.save(
             {
                 "model": model.state_dict(),
@@ -317,7 +348,8 @@ for epoch in range(1, cfg.training.epochs + 1):
             best_path,
         )
 
-torch.save(model.state_dict(), "model.pt")
-print("✅ Model saved.")
+final_path = run_dir / "final_model.pt"
+torch.save(model.state_dict(), final_path)
+print(f"✅ Model saved to {final_path}")
 if cfg.get("wandb", {}).get("enabled", True):
     wandb.finish()

@@ -1,16 +1,17 @@
 data_path: "dataset.pt"
-device: "cuda:3"
+device: "cuda:7"
 
 model:
   input_dim: 3072 # Fixed as OpenAI Embedding size
-  hidden_dim: 512
+  hidden_dim: 256
   residual: true
+  heads: 4
 
 sampler:
   fanout: [100, 100]
 
 training:
-  batch_size: 10000
+  batch_size: 14000
   epochs: 3
   lr: 5e-4
   warmup_ratio: 0.05  # fraction of total steps for linear warmup
