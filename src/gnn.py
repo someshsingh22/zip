@@ -1,77 +1,89 @@
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv
+import torch.nn as nn
 
+class GATBlock(nn.Module):
+    '''GATv2 MHA block with LayerNorm. No self loops for bipartite edges
+    
+    Args:
+        hidden_dim: Hidden dimension of the GATv2 block
+        heads: Number of heads for the GATv2Conv layer
+        edge_dim: Dimension of the edge attributes
+        dropout: Dropout rate
+    '''
+    def __init__(self, hidden_dim, heads, edge_dim=2, dropout=0.3):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.conv = GATv2Conv(
+            (-1, -1),
+            hidden_dim,
+            heads=heads,
+            concat=False,
+            add_self_loops=False,
+            edge_dim=edge_dim,
+            negative_slope=0.2,
+            dropout=dropout,
+            bias=True
+        )
+    
+    def forward(self, x, edge_index, edge_attr):
+        return self.conv((self.norm(x[0]), self.norm(x[1])), edge_index, edge_attr)
+    
+class NodeProjection(nn.Module):
+    def __init__(self, input_dim, hidden_dim, dropout=0.1, activation=nn.LeakyReLU(0.2)):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            activation,
+            nn.Dropout(dropout)
+        )
+    
+    def forward(self, x):
+        return self.proj(x)
 
-class UserSubredditSAGE(torch.nn.Module):
+class RedditGATv2(torch.nn.Module):
     def __init__(
         self, input_dim: int, hidden_dim: int, residual: bool = True, heads: int = 5
     ):
-        """GATv2 encoder for user-subject interactions.
+        """GATv2 encoder for Reddit interactions.
 
         Args:
-            input_dim: Dimensionality of subreddit input features.
-            hidden_dim: Hidden/channel size for projections and SAGE layers.
-            residual: Whether to add residual connections between graph layers.
+            input_dim: Dimensionality of subreddit input features (pretrained subreddit description embeddings).
+            hidden_dim: Hidden/channel size for projections and GATv2 layers.
+            residual: Whether to add residual (skip) connections between graph layers.
             heads: Number of heads for the GATv2Conv layers.
         """
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.residual = bool(residual)
-        self.sub_proj = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU()
-        )
-        self.user_proj = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, hidden_dim), torch.nn.ReLU()
-        )
-        # Use GATv2 with multi-head attention; keep output size == hidden_dim
-        # Set add_self_loops=False for bipartite edges
-        self.conv1 = GATv2Conv(
-            (-1, -1),
-            hidden_dim,
-            heads=heads,
-            concat=False,
-            add_self_loops=False,
-            edge_dim=2,
-        )
-        self.conv2 = GATv2Conv(
-            (-1, -1),
-            hidden_dim,
-            heads=heads,
-            concat=False,
-            add_self_loops=False,
-            edge_dim=2,
-        )
+        self.heads = heads
+        
+        self.sub_proj = NodeProjection(input_dim, hidden_dim)
+        self.user_proj = NodeProjection(input_dim, hidden_dim)
+        self.conv1 = GATBlock(hidden_dim, heads)
+        self.conv2 = GATBlock(hidden_dim, heads)
+        
+    def init_user_embeddings(self, edge_index_dict, d_type, device):
+        max_uid = 0
+        for (src_type, rel, dst_type), edge_index in edge_index_dict.items():
+            if src_type == "user":
+                max_uid = max(max_uid, int(edge_index[0].max()) + 1)
+            elif dst_type == "user":
+                max_uid = max(max_uid, int(edge_index[1].max()) + 1)
+        return torch.randn((max_uid, self.input_dim), dtype=d_type, device=device) * 0.01
 
     def forward(self, x_dict, edge_index_dict, edge_attr_dict=None):
-        # Freeze pretrained subreddit embeddings: prevent gradients flowing into the input features
         sub_features = x_dict["subreddit"]
         x_dict["subreddit"] = F.normalize(self.sub_proj(sub_features), dim=-1)
 
-        # Initialize user embeddings if missing (users have no features)
         if "user" not in x_dict:
-            # Infer number of users by inspecting edge_index_dict
-            max_uid = 0
-            for (src_type, rel, dst_type), edge_index in edge_index_dict.items():
-                if src_type == "user":
-                    max_uid = max(max_uid, int(edge_index[0].max()) + 1)
-                elif dst_type == "user":
-                    max_uid = max(max_uid, int(edge_index[1].max()) + 1)
-            # Initialize with normal distribution
-            x_dict["user"] = (
-                torch.randn(
-                    (max_uid, self.input_dim),
-                    dtype=x_dict["subreddit"].dtype,
-                    device=x_dict["subreddit"].device,
-                )
-                * 0.01
-            )
+            x_dict["user"] = self.init_user_embeddings(edge_index_dict, sub_features.dtype, sub_features.device)
         x_dict["user"] = F.normalize(self.user_proj(x_dict["user"]), dim=-1)
 
-        # Message passing over unified 'interacts' edges, reversed to output user embeddings.
         rev_etype = ("subreddit", "rev_interacts", "user")
-
         edge_index = edge_index_dict[rev_etype]
         edge_attr = None
         # Provide raw edge attributes directly to GATv2 (edge_dim=2)
@@ -85,17 +97,15 @@ class UserSubredditSAGE(torch.nn.Module):
             edge_index,
             edge_attr=edge_attr,
         )
-        if self.residual:
-            u1 = u1 + x_dict["user"]
-        u1 = u1.relu()
         # Layer 2
         u2 = self.conv2(
             (x_dict["subreddit"], u1),
             edge_index,
             edge_attr=edge_attr,
-        )
+        ) 
         if self.residual:
             u2 = u2 + u1
+        
         x_dict["user"] = F.normalize(u2, dim=-1)
         return x_dict
 
@@ -115,12 +125,12 @@ class DotPredictor(torch.nn.Module):
         self.proj_dim = proj_dim
         self.user_head = torch.nn.Sequential(
             torch.nn.Linear(proj_dim, proj_dim, bias=True),
-            torch.nn.ReLU(),
+            torch.nn.SiLU(),
             torch.nn.Linear(proj_dim, proj_dim, bias=True),
         )
         self.sub_head = torch.nn.Sequential(
             torch.nn.Linear(proj_dim, proj_dim, bias=True),
-            torch.nn.ReLU(),
+            torch.nn.SiLU(),
             torch.nn.Linear(proj_dim, proj_dim, bias=True),
         )
 
@@ -141,25 +151,18 @@ class DotPredictor(torch.nn.Module):
         return (q @ k.t()) * scale
 
 
-class TextProjector(torch.nn.Module):
-    def __init__(self, input_dim: int, output_dim: int):
-        """Project external text embeddings into the GNN hidden space.
-
-        Args:
-            input_dim: Dimensionality of the input text embeddings.
-            output_dim: Target hidden size to align with user/subreddit embeddings.
-        """
+class TextProjector(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, dropout: float = 0.1):
         super().__init__()
-        self.proj = torch.nn.Linear(input_dim, output_dim, bias=True)
+        self.proj = nn.Sequential(
+            nn.Linear(input_dim, output_dim),
+            nn.LayerNorm(output_dim),         # normalize variance across dims
+            nn.GELU(),                        # smooth nonlinearity, preserves sign
+            nn.Dropout(dropout),
+            nn.Linear(output_dim, output_dim),
+            nn.LayerNorm(output_dim),         # stabilize before normalization
+        )
 
     def forward(self, text_embeddings: torch.Tensor) -> torch.Tensor:
-        """Project and L2-normalize text embeddings.
-
-        Args:
-            text_embeddings: Tensor of shape [N, input_dim].
-
-        Returns:
-            Tensor of shape [N, output_dim], L2-normalized.
-        """
         x = self.proj(text_embeddings)
         return F.normalize(x, dim=-1)

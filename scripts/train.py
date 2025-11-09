@@ -5,7 +5,7 @@ from typing import Dict, Any, Tuple
 import torch
 import torch.nn.functional as F
 from torch_geometric.loader import LinkNeighborLoader
-from src.gnn import UserSubredditSAGE, DotPredictor, TextProjector
+from src.gnn import RedditGATv2, DotPredictor, TextProjector
 from tqdm.auto import tqdm
 import wandb
 from omegaconf import OmegaConf
@@ -37,7 +37,7 @@ print("Loading dataset...")
 data = torch.load(cfg.data_path, map_location="cpu", weights_only=False).pin_memory()
 
 device = cfg.device
-model = UserSubredditSAGE(
+model = RedditGATv2(
     input_dim=cfg.model.input_dim,
     hidden_dim=cfg.model.hidden_dim,
     residual=cfg.model.residual,

@@ -3,15 +3,15 @@ device: "cuda:7"
 
 model:
   input_dim: 3072 # Fixed as OpenAI Embedding size
-  hidden_dim: 256
+  hidden_dim: 512
   residual: true
-  heads: 4
+  heads: 6
 
 sampler:
   fanout: [100, 100]
 
 training:
-  batch_size: 14000
+  batch_size: 10000
   epochs: 3
   lr: 5e-4
   warmup_ratio: 0.05  # fraction of total steps for linear warmup
@@ -29,7 +29,7 @@ wandb:
 
 text_contrastive:
   enabled: true
-  author_emb_path: "data/reddit/author_title_embeddings.npy"
+  author_emb_path: "data/reddit/author_title_embeddings_bge.npy"
   users_csv: "data/reddit/user_index_map.csv"
   weight: 1.0
   max_pairs_per_batch: 2048

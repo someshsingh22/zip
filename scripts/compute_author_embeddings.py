@@ -169,7 +169,7 @@ def main() -> None:
     parser.add_argument(
         "--model-name",
         type=str,
-        default="sentence-transformers/all-MiniLM-L6-v2",
+        default="BAAI/bge-large-en-v1.5",
         help="HuggingFace model name for sentence embeddings.",
     )
     parser.add_argument(
@@ -186,7 +186,7 @@ def main() -> None:
         "--batch-size", type=int, default=1024, help="Encoding batch size per process."
     )
     parser.add_argument(
-        "--cap-per-user", type=int, default=50, help="Max number of titles per author."
+        "--cap-per-user", type=int, default=75, help="Max number of titles per author."
     )
     parser.add_argument(
         "--seed", type=int, default=1337, help="Random seed for per-author sampling."

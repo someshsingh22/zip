@@ -7,9 +7,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import polars as pl
 import torch
+from tqdm.auto import tqdm
 
 # Local imports
-from src.gnn import UserSubredditSAGE
+from src.gnn import RedditGATv2
 
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ def _build_batch_graph(
 
 @torch.no_grad()
 def batch_user_embeddings(
-    model: UserSubredditSAGE,
+    model: RedditGATv2,
     subreddit_features: torch.Tensor,
     interactions: Sequence[UserInteractions],
     device: Optional[torch.device] = None,
@@ -159,7 +160,7 @@ def batch_user_embeddings(
     user embeddings as computed by the model.
 
     Args:
-        model: Trained UserSubredditSAGE model (evaluation mode recommended).
+        model: Trained RedditGATv2 model (evaluation mode recommended).
         subreddit_features: Full subreddit embedding matrix (float32).
         interactions: Iterable of user interaction objects, one per user.
         device: Torch device for inference. Defaults to model's device if None.
@@ -181,6 +182,7 @@ def batch_user_embeddings(
     # Process in user batches
     start = 0
     total_users = len(interactions)
+    pbar = tqdm(total=total_users, desc="Embedding users", unit="user")
     while start < total_users:
         end = min(start + max_users_per_batch, total_users)
         batch = interactions[start:end]
@@ -202,6 +204,8 @@ def batch_user_embeddings(
 
         results.append(user_emb)
         start = end
+        pbar.update(end - start if end >= start else 0)
+    pbar.close()
 
     if model_was_training:
         model.train()
@@ -219,9 +223,9 @@ def _load_model_from_checkpoint(
     hidden_dim: int,
     residual: bool,
     device: torch.device,
-) -> UserSubredditSAGE:
-    """Utility to instantiate and load a UserSubredditSAGE from a checkpoint."""
-    model = UserSubredditSAGE(
+) -> RedditGATv2:
+    """Utility to instantiate and load a RedditGATv2 from a checkpoint."""
+    model = RedditGATv2(
         input_dim=input_dim, hidden_dim=hidden_dim, residual=residual
     ).to(device)
     state = torch.load(checkpoint_path, map_location=device)
@@ -235,13 +239,14 @@ def _load_model_from_checkpoint(
 def _read_parquets_build_graph_inputs(
     posts_file: str,
     comments_file: str,
-) -> Tuple[List[UserInteractions], List[str], np.ndarray, np.ndarray]:
+) -> Tuple[List[UserInteractions], List[str], List[str], np.ndarray, np.ndarray]:
     """Load two parquet files and build per-user interaction lists and totals.
 
     The two parquets must have columns: 'author', 'subreddit', 'total_count'.
 
     Returns:
-        interactions: List[UserInteractions] ordered by user_id ascending.
+        interactions: List[UserInteractions] ordered by user_id ascending (only users with edges).
+        authors: List of author names aligned with 'interactions' order.
         all_subs: List of subreddit names ordered by sub_id ascending.
         user_total_by_user: np.ndarray [n_users] of total activity per user.
         sub_total_by_sub: np.ndarray [n_subs] of total activity per subreddit.
@@ -327,8 +332,12 @@ def _read_parquets_build_graph_inputs(
     )
 
     interactions: List[UserInteractions] = []
+    authors: List[str] = []
+    all_users_list = list(all_users)
     # Convert to lists for Python side
     for row in grouped.iter_rows(named=True):
+        uid = int(row["user_id"])
+        authors.append(str(all_users_list[uid]))
         subs = list(row["sub_id_list"])
         posts = list(row["post_count_list"])
         comms = list(row["comment_count_list"])
@@ -356,7 +365,7 @@ def _read_parquets_build_graph_inputs(
 
     # Return also the subreddit names in id order
     all_subs_list = list(all_subs)
-    return interactions, all_subs_list, user_total_by_user, sub_total_by_sub
+    return interactions, authors, all_subs_list, user_total_by_user, sub_total_by_sub
 
 
 def _load_subreddit_embeddings_from_dict(
@@ -397,19 +406,19 @@ def main() -> None:
     parser.add_argument(
         "--posts",
         type=str,
-        required=True,
+        default="/dev/shm/zip/data/merged_submissions_filtered_gt1_dsp.parquet",
         help="Path to posts parquet (columns: author, subreddit, total_count)",
     )
     parser.add_argument(
         "--comments",
         type=str,
-        required=True,
+        default="/dev/shm/zip/data/merged_comments_filtered_3x3_dsp.parquet",
         help="Path to comments parquet (columns: author, subreddit, total_count)",
     )
     parser.add_argument(
         "--subreddit-emb",
         type=str,
-        required=True,
+        default="/dev/shm/zip/data/processed/subreddit_embeddings.npy",
         help="Path to subreddit_embeddings.npy (dict: name -> vector)",
     )
     parser.add_argument(
@@ -418,12 +427,13 @@ def main() -> None:
     parser.add_argument(
         "--hidden-dim",
         type=int,
-        required=True,
+        default=512,
         help="Model hidden size used during training",
     )
     parser.add_argument(
         "--residual",
-        action="store_true",
+        type=bool,
+        default=True,
         help="Enable residual connections (match training)",
     )
     parser.add_argument(
@@ -436,12 +446,12 @@ def main() -> None:
         "--out",
         type=str,
         required=True,
-        help="Output .npy file to save embeddings (ordered by user_id)",
+        help="Output .npy file with dict: author -> embedding (float32)",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
+        "--device", type=str, default="cuda:3" if torch.cuda.is_available() else "cpu"
     )
-    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=100000)
     parser.add_argument("--log-level", type=str, default="INFO")
     args = parser.parse_args()
 
@@ -453,7 +463,7 @@ def main() -> None:
     device = torch.device(args.device)
 
     # Read parquet inputs and construct interactions + totals
-    interactions, all_subs, user_total_by_user, sub_total_by_sub = (
+    interactions, authors, all_subs, user_total_by_user, sub_total_by_sub = (
         _read_parquets_build_graph_inputs(args.posts, args.comments)
     )
     # Load subreddit embeddings aligned with sub_id ordering
@@ -476,8 +486,12 @@ def main() -> None:
         device=device,
         max_users_per_batch=int(args.batch_size),
     )
-    np.save(args.out, emb.numpy())
-    logger.info("Saved embeddings: %s (shape=%s)", args.out, tuple(emb.shape))
+    # Build mapping author -> embedding (float32 numpy array)
+    author_to_emb: Dict[str, np.ndarray] = {}
+    for i, author in enumerate(authors):
+        author_to_emb[author] = emb[i].numpy()
+    np.save(args.out, author_to_emb, allow_pickle=True)
+    logger.info("Saved author->embedding dict: %s (num_authors=%d, dim=%d)", args.out, len(author_to_emb), int(emb.shape[1]) if emb.numel() > 0 else 0)
 
 
 if __name__ == "__main__":
